@@ -137,8 +137,8 @@ macro_rules! gen_component_wise_extractor {
                             for idx in 0..(size as u8).into() {
                                 let group = component_groups
                                     .iter()
-                                    .map(|cs| cs[idx])
-                                    .collect::<ArrayVec<_, N>>()
+                                    .map(|cs| cs.get(idx).cloned().ok_or(err.clone()))
+                                    .collect::<Result<ArrayVec<_, N>, _>>()?
                                     .into_inner()
                                     .unwrap();
                                 new_components.push($ident(
@@ -1175,8 +1175,8 @@ impl<'a> ConstantEvaluator<'a> {
                 component_wise_float!(self, span, [arg], |e| { Ok([e.floor()]) })
             }
             crate::MathFunction::Round => {
-                // TODO: Use `f{32,64}.round_ties_even()` when available on stable. This polyfill
-                // is shamelessly [~~stolen from~~ inspired by `ndarray-image`][polyfill source],
+                // TODO: this hit stable on 1.77, but MSRV hasn't caught up yet
+                // This polyfill is shamelessly [~~stolen from~~ inspired by `ndarray-image`][polyfill source],
                 // which has licensing compatible with ours. See also
                 // <https://github.com/rust-lang/rust/issues/96710>.
                 //

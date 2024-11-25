@@ -142,7 +142,6 @@ impl Surface<'_> {
                 texture: Texture {
                     context: Arc::clone(&self.context),
                     data,
-                    owned: false,
                     descriptor,
                 },
                 suboptimal,
@@ -160,7 +159,7 @@ impl Surface<'_> {
     /// - The raw handle obtained from the hal Surface must not be manually destroyed
     #[cfg(wgpu_core)]
     pub unsafe fn as_hal<A: wgc::hal_api::HalApi, F: FnOnce(Option<&A::Surface>) -> R, R>(
-        &mut self,
+        &self,
         hal_surface_callback: F,
     ) -> Option<R> {
         self.context
@@ -177,7 +176,7 @@ impl Surface<'_> {
 
 // This custom implementation is required because [`Surface::_surface`] doesn't
 // require [`Debug`](fmt::Debug), which we should not require from the user.
-impl<'window> fmt::Debug for Surface<'window> {
+impl fmt::Debug for Surface<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Surface")
             .field("context", &self.context)

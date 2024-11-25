@@ -2,12 +2,12 @@ use crate::{
     device::{
         bgl, Device, DeviceError, MissingDownlevelFlags, MissingFeatures, SHADER_STAGE_COUNT,
     },
-    id::{BindGroupLayoutId, BufferId, SamplerId, TextureViewId},
+    id::{BindGroupLayoutId, BufferId, SamplerId, TextureViewId, TlasId},
     init_tracker::{BufferInitTrackerAction, TextureInitTrackerAction},
     pipeline::{ComputePipeline, RenderPipeline},
     resource::{
-        Buffer, DestroyedResourceError, Labeled, MissingBufferUsageError, MissingTextureUsageError,
-        ResourceErrorIdent, Sampler, TextureView, TrackingData,
+        Buffer, DestroyedResourceError, InvalidResourceError, Labeled, MissingBufferUsageError,
+        MissingTextureUsageError, ResourceErrorIdent, Sampler, TextureView, TrackingData,
     },
     resource_log,
     snatch::{SnatchGuard, Snatchable},
@@ -17,7 +17,6 @@ use crate::{
 
 use arrayvec::ArrayVec;
 
-use once_cell::sync::OnceCell;
 #[cfg(feature = "serde")]
 use serde::Deserialize;
 #[cfg(feature = "serde")]
@@ -27,9 +26,10 @@ use std::{
     borrow::Cow,
     mem::ManuallyDrop,
     ops::Range,
-    sync::{Arc, Weak},
+    sync::{Arc, OnceLock, Weak},
 };
 
+use crate::resource::Tlas;
 use thiserror::Error;
 
 #[derive(Clone, Debug, Error)]
@@ -79,14 +79,6 @@ pub enum CreateBindGroupLayoutError {
 pub enum CreateBindGroupError {
     #[error(transparent)]
     Device(#[from] DeviceError),
-    #[error("Bind group layout is invalid")]
-    InvalidLayout,
-    #[error("BufferId {0:?} is invalid")]
-    InvalidBufferId(BufferId),
-    #[error("TextureViewId {0:?} is invalid")]
-    InvalidTextureViewId(TextureViewId),
-    #[error("SamplerId {0:?} is invalid")]
-    InvalidSamplerId(SamplerId),
     #[error(transparent)]
     DestroyedResource(#[from] DestroyedResourceError),
     #[error(
@@ -150,11 +142,18 @@ pub enum CreateBindGroupError {
         layout_multisampled: bool,
         view_samples: u32,
     },
-    #[error("Texture binding {binding} expects sample type = {layout_sample_type:?}, but given a view with format = {view_format:?}")]
+    #[error(
+        "Texture binding {} expects sample type {:?}, but was given a view with format {:?} (sample type {:?})",
+        binding,
+        layout_sample_type,
+        view_format,
+        view_sample_type
+    )]
     InvalidTextureSampleType {
         binding: u32,
         layout_sample_type: wgt::TextureSampleType,
         view_format: wgt::TextureFormat,
+        view_sample_type: wgt::TextureSampleType,
     },
     #[error("Texture binding {binding} expects dimension = {layout_dimension:?}, but given a view with dimension = {view_dimension:?}")]
     InvalidTextureDimension {
@@ -184,10 +183,12 @@ pub enum CreateBindGroupError {
     },
     #[error("Bound texture views can not have both depth and stencil aspects enabled")]
     DepthStencilAspect,
-    #[error("The adapter does not support read access for storages texture of format {0:?}")]
+    #[error("The adapter does not support read access for storage textures of format {0:?}")]
     StorageReadNotSupported(wgt::TextureFormat),
     #[error(transparent)]
     ResourceUsageCompatibility(#[from] ResourceUsageCompatibilityError),
+    #[error(transparent)]
+    InvalidResource(#[from] InvalidResourceError),
 }
 
 #[derive(Clone, Debug, Error)]
@@ -309,6 +310,7 @@ pub(crate) struct BindingTypeMaxCountValidator {
     storage_buffers: PerStageBindingTypeCounter,
     storage_textures: PerStageBindingTypeCounter,
     uniform_buffers: PerStageBindingTypeCounter,
+    acceleration_structures: PerStageBindingTypeCounter,
 }
 
 impl BindingTypeMaxCountValidator {
@@ -344,7 +346,9 @@ impl BindingTypeMaxCountValidator {
             wgt::BindingType::StorageTexture { .. } => {
                 self.storage_textures.add(binding.visibility, count);
             }
-            wgt::BindingType::AccelerationStructure => todo!(),
+            wgt::BindingType::AccelerationStructure => {
+                self.acceleration_structures.add(binding.visibility, count);
+            }
         }
     }
 
@@ -378,10 +382,6 @@ impl BindingTypeMaxCountValidator {
         self.sampled_textures.validate(
             limits.max_sampled_textures_per_shader_stage,
             BindingTypeMaxCountErrorKind::SampledTextures,
-        )?;
-        self.storage_buffers.validate(
-            limits.max_storage_buffers_per_shader_stage,
-            BindingTypeMaxCountErrorKind::StorageBuffers,
         )?;
         self.samplers.validate(
             limits.max_samplers_per_shader_stage,
@@ -508,7 +508,7 @@ pub struct BindGroupLayout {
     /// We cannot unconditionally remove from the pool, as BGLs that don't come from the pool
     /// (derived BGLs) must not be removed.
     pub(crate) origin: bgl::Origin,
-    pub(crate) exclusive_pipeline: OnceCell<ExclusivePipeline>,
+    pub(crate) exclusive_pipeline: OnceLock<ExclusivePipeline>,
     #[allow(unused)]
     pub(crate) binding_count_validator: BindingTypeMaxCountValidator,
     /// The `label` from the descriptor used to create the resource.
@@ -545,8 +545,6 @@ impl BindGroupLayout {
 pub enum CreatePipelineLayoutError {
     #[error(transparent)]
     Device(#[from] DeviceError),
-    #[error("BindGroupLayoutId {0:?} is invalid")]
-    InvalidBindGroupLayoutId(BindGroupLayoutId),
     #[error(
         "Push constant at index {index} has range bound {bound} not aligned to {}",
         wgt::PUSH_CONSTANT_ALIGNMENT
@@ -570,6 +568,8 @@ pub enum CreatePipelineLayoutError {
     TooManyBindings(BindingTypeMaxCountError),
     #[error("Bind group layout count {actual} exceeds device bind group limit {max}")]
     TooManyGroups { actual: usize, max: usize },
+    #[error(transparent)]
+    InvalidResource(#[from] InvalidResourceError),
 }
 
 #[derive(Clone, Debug, Error)]
@@ -792,6 +792,7 @@ pub enum BindingResource<'a> {
     SamplerArray(Cow<'a, [SamplerId]>),
     TextureView(TextureViewId),
     TextureViewArray(Cow<'a, [TextureViewId]>),
+    AccelerationStructure(TlasId),
 }
 
 // Note: Duplicated in `wgpu-rs` as `BindingResource`
@@ -804,6 +805,7 @@ pub enum ResolvedBindingResource<'a> {
     SamplerArray(Cow<'a, [Arc<Sampler>]>),
     TextureView(Arc<TextureView>),
     TextureViewArray(Cow<'a, [Arc<TextureView>]>),
+    AccelerationStructure(Arc<Tlas>),
 }
 
 #[derive(Clone, Debug, Error)]
@@ -926,7 +928,7 @@ impl BindGroup {
     pub(crate) fn try_raw<'a>(
         &'a self,
         guard: &'a SnatchGuard,
-    ) -> Result<&dyn hal::DynBindGroup, DestroyedResourceError> {
+    ) -> Result<&'a dyn hal::DynBindGroup, DestroyedResourceError> {
         // Clippy insist on writing it this way. The idea is to return None
         // if any of the raw buffer is not valid anymore.
         for buffer in &self.used_buffer_ranges {
@@ -1003,10 +1005,10 @@ crate::impl_trackable!(BindGroup);
 #[derive(Clone, Debug, Error)]
 #[non_exhaustive]
 pub enum GetBindGroupLayoutError {
-    #[error("Pipeline is invalid")]
-    InvalidPipeline,
     #[error("Invalid group index {0}")]
     InvalidGroupIndex(u32),
+    #[error(transparent)]
+    InvalidResource(#[from] InvalidResourceError),
 }
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]

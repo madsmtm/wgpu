@@ -503,6 +503,9 @@ impl crate::CommandEncoder for super::CommandEncoder {
                     for triangles in in_geometries {
                         let mut triangle_data =
                             vk::AccelerationStructureGeometryTrianglesDataKHR::default()
+                                // IndexType::NONE_KHR is not set by default (due to being provided by VK_KHR_acceleration_structure) but unless there is an
+                                // index buffer we need to have IndexType::NONE_KHR as our index type.
+                                .index_type(vk::IndexType::NONE_KHR)
                                 .vertex_data(vk::DeviceOrHostAddressConstKHR {
                                     device_address: get_device_address(triangles.vertex_buffer),
                                 })
@@ -644,10 +647,14 @@ impl crate::CommandEncoder for super::CommandEncoder {
         &mut self,
         barrier: crate::AccelerationStructureBarrier,
     ) {
-        let (src_stage, src_access) =
-            conv::map_acceleration_structure_usage_to_barrier(barrier.usage.start);
-        let (dst_stage, dst_access) =
-            conv::map_acceleration_structure_usage_to_barrier(barrier.usage.end);
+        let (src_stage, src_access) = conv::map_acceleration_structure_usage_to_barrier(
+            barrier.usage.start,
+            self.device.features,
+        );
+        let (dst_stage, dst_access) = conv::map_acceleration_structure_usage_to_barrier(
+            barrier.usage.end,
+            self.device.features,
+        );
 
         unsafe {
             self.device.raw.cmd_pipeline_barrier(

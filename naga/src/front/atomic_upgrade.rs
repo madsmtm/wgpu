@@ -44,12 +44,8 @@ pub enum Error {
     MultiMemberStruct,
     #[error("encountered unsupported global initializer in an atomic variable")]
     GlobalInitUnsupported,
-}
-
-impl From<Error> for crate::front::spv::Error {
-    fn from(source: Error) -> Self {
-        crate::front::spv::Error::AtomicUpgradeError(source)
-    }
+    #[error("expected to find a global variable")]
+    GlobalVariableMissing,
 }
 
 #[derive(Clone, Default)]
@@ -94,7 +90,7 @@ struct UpgradeState<'a> {
     module: &'a mut Module,
 }
 
-impl<'a> UpgradeState<'a> {
+impl UpgradeState<'_> {
     fn inc_padding(&self) -> Padding {
         self.padding.inc_padding()
     }

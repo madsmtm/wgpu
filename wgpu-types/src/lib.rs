@@ -91,7 +91,7 @@ pub const VERTEX_STRIDE_ALIGNMENT: BufferAddress = 4;
 /// Alignment all push constants need
 pub const PUSH_CONSTANT_ALIGNMENT: u32 = 4;
 /// Maximum queries in a query set
-pub const QUERY_SET_MAX_QUERIES: u32 = 8192;
+pub const QUERY_SET_MAX_QUERIES: u32 = 4096;
 /// Size of a single piece of query data.
 pub const QUERY_SIZE: u32 = 8;
 
@@ -568,7 +568,7 @@ bitflags::bitflags! {
         /// may also create uniform arrays of storage textures.
         ///
         /// ex.
-        /// - `var textures: array<texture_storage_2d<f32, write>, 10>` (WGSL)
+        /// - `var textures: array<texture_storage_2d<r32float, write>, 10>` (WGSL)
         /// - `uniform image2D textures[10]` (GLSL)
         ///
         /// This capability allows them to exist and to be indexed by dynamically uniform
@@ -828,23 +828,32 @@ bitflags::bitflags! {
         ///
         /// This is a native only feature.
         const TEXTURE_FORMAT_NV12 = 1 << 47;
-        /// Allows for the creation of ray-tracing acceleration structures.
+        /// ***THIS IS EXPERIMENTAL:*** Features enabled by this may have
+        /// major bugs in them and are expected to be subject to breaking changes, suggestions
+        /// for the API exposed by this should be posted on [the ray-tracing issue](https://github.com/gfx-rs/wgpu/issues/1040)
+        ///
+        /// Allows for the creation of ray-tracing acceleration structures. Currently,
+        /// ray-tracing acceleration structures are only useful when used with [Features::EXPERIMENTAL_RAY_QUERY]
         ///
         /// Supported platforms:
         /// - Vulkan
         ///
         /// This is a native-only feature.
-        const RAY_TRACING_ACCELERATION_STRUCTURE = 1 << 48;
+        const EXPERIMENTAL_RAY_TRACING_ACCELERATION_STRUCTURE = 1 << 48;
 
         // Shader:
 
+        /// ***THIS IS EXPERIMENTAL:*** Features enabled by this may have
+        /// major bugs in it and are expected to be subject to breaking changes, suggestions
+        /// for the API exposed by this should be posted on [the ray-tracing issue](https://github.com/gfx-rs/wgpu/issues/1040)
+        ///
         /// Allows for the creation of ray-tracing queries within shaders.
         ///
         /// Supported platforms:
         /// - Vulkan
         ///
         /// This is a native-only feature.
-        const RAY_QUERY = 1 << 49;
+        const EXPERIMENTAL_RAY_QUERY = 1 << 49;
         /// Enables 64-bit floating point types in SPIR-V shaders.
         ///
         /// Note: even when supported by GPU hardware, 64-bit floating point operations are
@@ -985,6 +994,16 @@ impl Features {
     #[must_use]
     pub const fn all_native_mask() -> Self {
         Self::from_bits_truncate(!Self::all_webgpu_mask().bits())
+    }
+
+    /// Vertex formats allowed for creating and building BLASes
+    #[must_use]
+    pub fn allowed_vertex_formats_for_blas(&self) -> Vec<VertexFormat> {
+        let mut formats = Vec::new();
+        if self.contains(Self::EXPERIMENTAL_RAY_TRACING_ACCELERATION_STRUCTURE) {
+            formats.push(VertexFormat::Float32x3);
+        }
+        formats
     }
 }
 
@@ -1959,12 +1978,13 @@ impl TextureViewDimension {
 
 /// Alpha blend factor.
 ///
-/// Alpha blending is very complicated: see the OpenGL or Vulkan spec for more information.
-///
 /// Corresponds to [WebGPU `GPUBlendFactor`](
-/// https://gpuweb.github.io/gpuweb/#enumdef-gpublendfactor).
-/// Values using S1 requires [`Features::DUAL_SOURCE_BLENDING`] and can only be
-/// used with the first render target.
+/// https://gpuweb.github.io/gpuweb/#enumdef-gpublendfactor). Values using `Src1`
+/// require [`Features::DUAL_SOURCE_BLENDING`] and can only be used with the first
+/// render target.
+///
+/// For further details on how the blend factors are applied, see the analogous
+/// functionality in OpenGL: <https://www.khronos.org/opengl/wiki/Blending#Blending_Parameters>.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Hash, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
@@ -2024,10 +2044,11 @@ impl BlendFactor {
 
 /// Alpha blend operation.
 ///
-/// Alpha blending is very complicated: see the OpenGL or Vulkan spec for more information.
-///
 /// Corresponds to [WebGPU `GPUBlendOperation`](
 /// https://gpuweb.github.io/gpuweb/#enumdef-gpublendoperation).
+///
+/// For further details on how the blend operations are applied, see
+/// the analogous functionality in OpenGL: <https://www.khronos.org/opengl/wiki/Blending#Blend_Equations>.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, Hash, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
@@ -2101,8 +2122,6 @@ impl Default for BlendComponent {
 
 /// Describe the blend state of a render pipeline,
 /// within [`ColorTargetState`].
-///
-/// See the OpenGL or Vulkan spec for more information.
 ///
 /// Corresponds to [WebGPU `GPUBlendState`](
 /// https://gpuweb.github.io/gpuweb/#dictdef-gpublendstate).
@@ -2803,7 +2822,7 @@ impl<'de> Deserialize<'de> for TextureFormat {
 
         struct TextureFormatVisitor;
 
-        impl<'de> de::Visitor<'de> for TextureFormatVisitor {
+        impl de::Visitor<'_> for TextureFormatVisitor {
             type Value = TextureFormat;
 
             fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -5296,6 +5315,10 @@ bitflags::bitflags! {
         const INDIRECT = 1 << 8;
         /// Allow a buffer to be the destination buffer for a [`CommandEncoder::resolve_query_set`] operation.
         const QUERY_RESOLVE = 1 << 9;
+        /// Allows a buffer to be used as input for a bottom level acceleration structure build
+        const BLAS_INPUT = 1 << 10;
+        /// Allows a buffer to be used as input for a top level acceleration structure build
+        const TLAS_INPUT = 1 << 11;
     }
 }
 
@@ -5878,8 +5901,8 @@ impl Extent3d {
     pub fn physical_size(&self, format: TextureFormat) -> Self {
         let (block_width, block_height) = format.block_dimensions();
 
-        let width = ((self.width + block_width - 1) / block_width) * block_width;
-        let height = ((self.height + block_height - 1) / block_height) * block_height;
+        let width = self.width.div_ceil(block_width) * block_width;
+        let height = self.height.div_ceil(block_height) * block_height;
 
         Self {
             width,
@@ -6543,7 +6566,7 @@ pub enum StorageTextureAccess {
     /// Example WGSL syntax:
     /// ```rust,ignore
     /// @group(0) @binding(0)
-    /// var my_storage_image: texture_storage_2d<f32, write>;
+    /// var my_storage_image: texture_storage_2d<r32float, write>;
     /// ```
     ///
     /// Example GLSL syntax:
@@ -6560,7 +6583,7 @@ pub enum StorageTextureAccess {
     /// Example WGSL syntax:
     /// ```rust,ignore
     /// @group(0) @binding(0)
-    /// var my_storage_image: texture_storage_2d<f32, read>;
+    /// var my_storage_image: texture_storage_2d<r32float, read>;
     /// ```
     ///
     /// Example GLSL syntax:
@@ -6577,7 +6600,7 @@ pub enum StorageTextureAccess {
     /// Example WGSL syntax:
     /// ```rust,ignore
     /// @group(0) @binding(0)
-    /// var my_storage_image: texture_storage_2d<f32, read_write>;
+    /// var my_storage_image: texture_storage_2d<r32float, read_write>;
     /// ```
     ///
     /// Example GLSL syntax:
@@ -6701,8 +6724,8 @@ pub enum BindingType {
         /// Dimension of the texture view that is going to be sampled.
         view_dimension: TextureViewDimension,
         /// True if the texture has a sample count greater than 1. If this is true,
-        /// the texture must be read from shaders with `texture1DMS`, `texture2DMS`, or `texture3DMS`,
-        /// depending on `dimension`.
+        /// the texture must be declared as `texture_multisampled_2d` or
+        /// `texture_depth_multisampled_2d` in the shader, and read using `textureLoad`.
         multisampled: bool,
     },
     /// A storage texture.
@@ -6710,15 +6733,16 @@ pub enum BindingType {
     /// Example WGSL syntax:
     /// ```rust,ignore
     /// @group(0) @binding(0)
-    /// var my_storage_image: texture_storage_2d<f32, write>;
+    /// var my_storage_image: texture_storage_2d<r32float, write>;
     /// ```
     ///
     /// Example GLSL syntax:
     /// ```cpp,ignore
     /// layout(set=0, binding=0, r32f) writeonly uniform image2D myStorageImage;
     /// ```
-    /// Note that the texture format must be specified in the shader as well.
-    /// A list of valid formats can be found in the specification here: <https://www.khronos.org/registry/OpenGL/specs/gl/GLSLangSpec.4.60.html#layout-qualifiers>
+    /// Note that the texture format must be specified in the shader, along with the
+    /// access mode. For WGSL, the format must be one of the enumerants in the list
+    /// of [storage texel formats](https://gpuweb.github.io/gpuweb/wgsl/#storage-texel-formats).
     ///
     /// Corresponds to [WebGPU `GPUStorageTextureBindingLayout`](
     /// https://gpuweb.github.io/gpuweb/#dictdef-gpustoragetexturebindinglayout).
@@ -6985,7 +7009,7 @@ pub struct ImageCopyTextureTagged<T> {
     pub premultiplied_alpha: bool,
 }
 
-impl<T: Copy> ImageCopyTextureTagged<T> {
+impl<T> ImageCopyTextureTagged<T> {
     /// Removes the colorspace information from the type.
     pub fn to_untagged(self) -> ImageCopyTexture<T> {
         ImageCopyTexture {
@@ -7422,19 +7446,119 @@ impl Default for InstanceDescriptor {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+/// Descriptor for all size defining attributes of a single triangle geometry inside a bottom level acceleration structure.
+pub struct BlasTriangleGeometrySizeDescriptor {
+    /// Format of a vertex position, must be [VertexFormat::Float32x3]
+    /// with just [Features::EXPERIMENTAL_RAY_TRACING_ACCELERATION_STRUCTURE]
+    /// but later features may add more formats.
+    pub vertex_format: VertexFormat,
+    /// Number of vertices.
+    pub vertex_count: u32,
+    /// Format of an index. Only needed if an index buffer is used.
+    /// If `index_format` is provided `index_count` is required.
+    pub index_format: Option<IndexFormat>,
+    /// Number of indices. Only needed if an index buffer is used.
+    /// If `index_count` is provided `index_format` is required.
+    pub index_count: Option<u32>,
+    /// Flags for the geometry.
+    pub flags: AccelerationStructureGeometryFlags,
+}
+
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+/// Descriptor for all size defining attributes of all geometries inside a bottom level acceleration structure.
+pub enum BlasGeometrySizeDescriptors {
+    /// Triangle geometry version.
+    Triangles {
+        /// Descriptor for each triangle geometry.
+        descriptors: Vec<BlasTriangleGeometrySizeDescriptor>,
+    },
+}
+
+#[repr(u8)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+/// Update mode for acceleration structure builds.
+pub enum AccelerationStructureUpdateMode {
+    /// Always perform a full build.
+    Build,
+    /// If possible, perform an incremental update.
+    ///
+    /// Not advised for major topology changes.
+    /// (Useful for e.g. skinning)
+    PreferUpdate,
+}
+
+#[repr(C)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+/// Descriptor for creating a bottom level acceleration structure.
+pub struct CreateBlasDescriptor<L> {
+    /// Label for the bottom level acceleration structure.
+    pub label: L,
+    /// Flags for the bottom level acceleration structure.
+    pub flags: AccelerationStructureFlags,
+    /// Update mode for the bottom level acceleration structure.
+    pub update_mode: AccelerationStructureUpdateMode,
+}
+
+impl<L> CreateBlasDescriptor<L> {
+    /// Takes a closure and maps the label of the blas descriptor into another.
+    pub fn map_label<K>(&self, fun: impl FnOnce(&L) -> K) -> CreateBlasDescriptor<K> {
+        CreateBlasDescriptor {
+            label: fun(&self.label),
+            flags: self.flags,
+            update_mode: self.update_mode,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+/// Descriptor for creating a top level acceleration structure.
+pub struct CreateTlasDescriptor<L> {
+    /// Label for the top level acceleration structure.
+    pub label: L,
+    /// Number of instances that can be stored in the acceleration structure.
+    pub max_instances: u32,
+    /// Flags for the bottom level acceleration structure.
+    pub flags: AccelerationStructureFlags,
+    /// Update mode for the bottom level acceleration structure.
+    pub update_mode: AccelerationStructureUpdateMode,
+}
+
+impl<L> CreateTlasDescriptor<L> {
+    /// Takes a closure and maps the label of the blas descriptor into another.
+    pub fn map_label<K>(&self, fun: impl FnOnce(&L) -> K) -> CreateTlasDescriptor<K> {
+        CreateTlasDescriptor {
+            label: fun(&self.label),
+            flags: self.flags,
+            update_mode: self.update_mode,
+            max_instances: self.max_instances,
+        }
+    }
+}
+
 bitflags::bitflags!(
     /// Flags for acceleration structures
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct AccelerationStructureFlags: u8 {
-        /// Allow for incremental updates (no change in size)
+        /// Allow for incremental updates (no change in size), currently this is unimplemented
+        /// and will build as normal (this is fine, update vs build should be unnoticeable)
         const ALLOW_UPDATE = 1 << 0;
-        /// Allow the acceleration structure to be compacted in a copy operation
+        /// Allow the acceleration structure to be compacted in a copy operation, the function
+        /// to compact is not currently implemented.
         const ALLOW_COMPACTION = 1 << 1;
-        /// Optimize for fast ray tracing performance
+        /// Optimize for fast ray tracing performance, recommended if the geometry is unlikely
+        /// to change (e.g. in a game: non-interactive scene geometry)
         const PREFER_FAST_TRACE = 1 << 2;
-        /// Optimize for fast build time
+        /// Optimize for fast build time, recommended if geometry is likely to change frequently
+        /// (e.g. in a game: player model).
         const PREFER_FAST_BUILD = 1 << 3;
-        /// Optimize for low memory footprint (scratch and output)
+        /// Optimize for low memory footprint (both while building and in the output BLAS).
         const LOW_MEMORY = 1 << 4;
     }
 );
@@ -7444,13 +7568,26 @@ bitflags::bitflags!(
     /// Flags for acceleration structure geometries
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct AccelerationStructureGeometryFlags: u8 {
-        /// Is OPAQUE
+        /// Is OPAQUE (is there no alpha test) recommended as currently in naga there is no
+        /// candidate intersections yet so currently BLASes without this flag will not have hits.
+        /// Not enabling this makes the BLAS unable to be interacted with in WGSL.
         const OPAQUE = 1 << 0;
-        /// NO_DUPLICATE_ANY_HIT_INVOCATION
+        /// NO_DUPLICATE_ANY_HIT_INVOCATION, not useful unless using hal with wgpu, ray-tracing
+        /// pipelines are not supported in wgpu so any-hit shaders do not exist. For when any-hit
+        /// shaders are implemented (or experienced users who combine this with an underlying library:
+        /// for any primitive (triangle or AABB) multiple any-hit shaders sometimes may be invoked
+        /// (especially in AABBs like a sphere), if this flag in present only one hit on a primitive may
+        /// invoke an any-hit shader.
         const NO_DUPLICATE_ANY_HIT_INVOCATION = 1 << 1;
     }
 );
 impl_bitflags!(AccelerationStructureGeometryFlags);
+
+/// Alignment requirement for transform buffers used in acceleration structure builds
+pub const TRANSFORM_BUFFER_ALIGNMENT: BufferAddress = 16;
+
+/// Alignment requirement for instance buffers used in acceleration structure builds (`build_acceleration_structures_unsafe_tlas`)
+pub const INSTANCE_BUFFER_ALIGNMENT: BufferAddress = 16;
 
 pub use send_sync::*;
 
@@ -7550,10 +7687,4 @@ pub enum DeviceLostReason {
     /// exactly once before it is dropped, which helps with managing the
     /// memory owned by the callback.
     ReplacedCallback = 3,
-    /// When setting the callback, but the device is already invalid
-    ///
-    /// As above, when the callback is provided, wgpu guarantees that it
-    /// will eventually be called. If the device is already invalid, wgpu
-    /// will call the callback immediately, with this reason.
-    DeviceInvalid = 4,
 }

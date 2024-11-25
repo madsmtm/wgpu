@@ -22,7 +22,7 @@ bitflags::bitflags! {
     }
 }
 
-impl<'function> super::BlockContext<'function> {
+impl super::BlockContext<'_> {
     fn get_image_expr_ty(
         &self,
         handle: Handle<crate::Expression>,
@@ -30,6 +30,7 @@ impl<'function> super::BlockContext<'function> {
         match self.expressions[handle] {
             crate::Expression::GlobalVariable(handle) => Ok(self.global_arena[handle].ty),
             crate::Expression::FunctionArgument(i) => Ok(self.arguments[i as usize].ty),
+            crate::Expression::Access { base, .. } => Ok(self.get_image_expr_ty(base)?),
             ref other => Err(Error::InvalidImageExpression(other.clone())),
         }
     }
@@ -377,36 +378,61 @@ impl<I: Iterator<Item = u32>> super::Frontend<I> {
         let coord_handle =
             self.get_expr_handle(coordinate_id, coord_lexp, ctx, emitter, block, body_idx);
         let coord_type_handle = self.lookup_type.lookup(coord_lexp.type_id)?.handle;
-        let (coordinate, array_index) = match ctx.type_arena[image_ty].inner {
+        let (coordinate, array_index, is_depth) = match ctx.type_arena[image_ty].inner {
             crate::TypeInner::Image {
                 dim,
                 arrayed,
-                class: _,
-            } => extract_image_coordinates(
-                dim,
-                if arrayed {
-                    ExtraCoordinate::ArrayLayer
-                } else {
-                    ExtraCoordinate::Garbage
-                },
-                coord_handle,
-                coord_type_handle,
-                ctx,
-            ),
+                class,
+            } => {
+                let (coord, array_index) = extract_image_coordinates(
+                    dim,
+                    if arrayed {
+                        ExtraCoordinate::ArrayLayer
+                    } else {
+                        ExtraCoordinate::Garbage
+                    },
+                    coord_handle,
+                    coord_type_handle,
+                    ctx,
+                );
+                (coord, array_index, class.is_depth())
+            }
             _ => return Err(Error::InvalidImage(image_ty)),
         };
 
-        let expr = crate::Expression::ImageLoad {
+        let image_load_expr = crate::Expression::ImageLoad {
             image: image_lexp.handle,
             coordinate,
             array_index,
             sample,
             level,
         };
+        let image_load_handle = ctx
+            .expressions
+            .append(image_load_expr, self.span_from_with_op(start));
+
+        let handle = if is_depth {
+            let result_ty = self.lookup_type.lookup(result_type_id)?;
+            // The return type of `OpImageRead` can be a scalar or vector.
+            match ctx.type_arena[result_ty.handle].inner {
+                crate::TypeInner::Vector { size, .. } => {
+                    let splat_expr = crate::Expression::Splat {
+                        size,
+                        value: image_load_handle,
+                    };
+                    ctx.expressions
+                        .append(splat_expr, self.span_from_with_op(start))
+                }
+                _ => image_load_handle,
+            }
+        } else {
+            image_load_handle
+        };
+
         self.lookup_expression.insert(
             result_id,
             LookupExpression {
-                handle: ctx.expressions.append(expr, self.span_from_with_op(start)),
+                handle,
                 type_id: result_type_id,
                 block_id,
             },
@@ -435,6 +461,7 @@ impl<I: Iterator<Item = u32>> super::Frontend<I> {
         } else {
             None
         };
+        let span = self.span_from_with_op(start);
 
         let mut image_ops = if words_left != 0 {
             words_left -= 1;
@@ -461,9 +488,34 @@ impl<I: Iterator<Item = u32>> super::Frontend<I> {
                     let lod_lexp = self.lookup_expression.lookup(lod_expr)?;
                     let lod_handle =
                         self.get_expr_handle(lod_expr, lod_lexp, ctx, emitter, block, body_idx);
+
+                    let is_depth_image = {
+                        let image_lexp = self.lookup_sampled_image.lookup(sampled_image_id)?;
+                        let image_ty = ctx.get_image_expr_ty(image_lexp.image)?;
+                        matches!(
+                            ctx.type_arena[image_ty].inner,
+                            crate::TypeInner::Image {
+                                class: crate::ImageClass::Depth { .. },
+                                ..
+                            }
+                        )
+                    };
+
                     level = if options.compare {
                         log::debug!("Assuming {:?} is zero", lod_handle);
                         crate::SampleLevel::Zero
+                    } else if is_depth_image {
+                        log::debug!(
+                            "Assuming level {:?} converts losslessly to an integer",
+                            lod_handle
+                        );
+                        let expr = crate::Expression::As {
+                            expr: lod_handle,
+                            kind: crate::ScalarKind::Sint,
+                            convert: Some(4),
+                        };
+                        let s32_lod_handle = ctx.expressions.append(expr, span);
+                        crate::SampleLevel::Exact(s32_lod_handle)
                     } else {
                         crate::SampleLevel::Exact(lod_handle)
                     };
@@ -593,11 +645,12 @@ impl<I: Iterator<Item = u32>> super::Frontend<I> {
             ref other => return Err(Error::InvalidGlobalVar(other.clone())),
         }
 
-        let ((coordinate, array_index), depth_ref) = match ctx.type_arena[image_ty].inner {
+        let ((coordinate, array_index), depth_ref, is_depth) = match ctx.type_arena[image_ty].inner
+        {
             crate::TypeInner::Image {
                 dim,
                 arrayed,
-                class: _,
+                class,
             } => (
                 extract_image_coordinates(
                     dim,
@@ -642,6 +695,7 @@ impl<I: Iterator<Item = u32>> super::Frontend<I> {
                         None => None,
                     }
                 },
+                class.is_depth(),
             ),
             _ => return Err(Error::InvalidImage(image_ty)),
         };
@@ -656,10 +710,21 @@ impl<I: Iterator<Item = u32>> super::Frontend<I> {
             level,
             depth_ref,
         };
+        let image_sample_handle = ctx.expressions.append(expr, self.span_from_with_op(start));
+        let handle = if is_depth && depth_ref.is_none() {
+            let splat_expr = crate::Expression::Splat {
+                size: crate::VectorSize::Quad,
+                value: image_sample_handle,
+            };
+            ctx.expressions
+                .append(splat_expr, self.span_from_with_op(start))
+        } else {
+            image_sample_handle
+        };
         self.lookup_expression.insert(
             result_id,
             LookupExpression {
-                handle: ctx.expressions.append(expr, self.span_from_with_op(start)),
+                handle,
                 type_id: result_type_id,
                 block_id,
             },

@@ -22,6 +22,7 @@ pub(crate) mod bgl;
 pub mod global;
 mod life;
 pub mod queue;
+pub mod ray_tracing;
 pub mod resource;
 #[cfg(any(feature = "trace", feature = "replay"))]
 pub mod trace;
@@ -36,7 +37,7 @@ pub(crate) const ZERO_BUFFER_SIZE: BufferAddress = 512 << 10;
 // See https://github.com/gfx-rs/wgpu/issues/4589. 60s to reduce the chances of this.
 const CLEANUP_WAIT_MS: u32 = 60000;
 
-const ENTRYPOINT_FAILURE_ERROR: &str = "The given EntryPoint is Invalid";
+pub(crate) const ENTRYPOINT_FAILURE_ERROR: &str = "The given EntryPoint is Invalid";
 
 pub type DeviceDescriptor<'a> = wgt::DeviceDescriptor<Label<'a>>;
 
@@ -297,24 +298,25 @@ impl DeviceLostClosure {
     }
 }
 
-fn map_buffer(
-    raw: &dyn hal::DynDevice,
+pub(crate) fn map_buffer(
     buffer: &Buffer,
     offset: BufferAddress,
     size: BufferAddress,
     kind: HostMap,
     snatch_guard: &SnatchGuard,
 ) -> Result<hal::BufferMapping, BufferAccessError> {
+    let raw_device = buffer.device.raw();
     let raw_buffer = buffer.try_raw(snatch_guard)?;
     let mapping = unsafe {
-        raw.map_buffer(raw_buffer, offset..offset + size)
+        raw_device
+            .map_buffer(raw_buffer, offset..offset + size)
             .map_err(|e| buffer.device.handle_hal_error(e))?
     };
 
     if !mapping.is_coherent && kind == HostMap::Read {
         #[allow(clippy::single_range_in_vec_init)]
         unsafe {
-            raw.invalidate_mapped_ranges(raw_buffer, &[offset..offset + size]);
+            raw_device.invalidate_mapped_ranges(raw_buffer, &[offset..offset + size]);
         }
     }
 
@@ -369,7 +371,7 @@ fn map_buffer(
                 && kind == HostMap::Read
                 && buffer.usage.contains(wgt::BufferUsages::MAP_WRITE)
             {
-                unsafe { raw.flush_mapped_ranges(raw_buffer, &[uninitialized]) };
+                unsafe { raw_device.flush_mapped_ranges(raw_buffer, &[uninitialized]) };
             }
         }
     }
@@ -414,8 +416,6 @@ pub enum DeviceError {
     OutOfMemory,
     #[error("Creation of a resource failed for a reason other than running out of memory.")]
     ResourceCreationFailed,
-    #[error("DeviceId is invalid")]
-    InvalidDeviceId,
     #[error(transparent)]
     DeviceMismatch(#[from] Box<DeviceMismatch>),
 }
@@ -459,20 +459,12 @@ pub struct ImplicitPipelineIds<'a> {
 
 impl ImplicitPipelineIds<'_> {
     fn prepare(self, hub: &Hub) -> ImplicitPipelineContext {
-        let backend = self.root_id.backend();
         ImplicitPipelineContext {
-            root_id: hub
-                .pipeline_layouts
-                .prepare(backend, Some(self.root_id))
-                .into_id(),
+            root_id: hub.pipeline_layouts.prepare(Some(self.root_id)).id(),
             group_ids: self
                 .group_ids
                 .iter()
-                .map(|id_in| {
-                    hub.bind_group_layouts
-                        .prepare(backend, Some(*id_in))
-                        .into_id()
-                })
+                .map(|id_in| hub.bind_group_layouts.prepare(Some(*id_in)).id())
                 .collect(),
         }
     }
@@ -553,6 +545,10 @@ pub fn create_validator(
     caps.set(
         Caps::SUBGROUP_BARRIER,
         features.intersects(wgt::Features::SUBGROUP_BARRIER),
+    );
+    caps.set(
+        Caps::RAY_QUERY,
+        features.intersects(wgt::Features::EXPERIMENTAL_RAY_QUERY),
     );
     caps.set(
         Caps::SUBGROUP_VERTEX_STAGE,

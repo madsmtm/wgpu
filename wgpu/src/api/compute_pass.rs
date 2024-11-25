@@ -19,7 +19,7 @@ pub struct ComputePass<'encoder> {
     pub(crate) encoder_guard: PhantomData<&'encoder ()>,
 }
 
-impl<'encoder> ComputePass<'encoder> {
+impl ComputePass<'_> {
     /// Drops the lifetime relationship to the parent command encoder, making usage of
     /// the encoder while this pass is recorded a run-time error instead.
     ///
@@ -45,13 +45,13 @@ impl<'encoder> ComputePass<'encoder> {
     /// If the bind group have dynamic offsets, provide them in the binding order.
     /// These offsets have to be aligned to [`Limits::min_uniform_buffer_offset_alignment`]
     /// or [`Limits::min_storage_buffer_offset_alignment`] appropriately.
-    pub fn set_bind_group(
+    pub fn set_bind_group<'a>(
         &mut self,
         index: u32,
-        bind_group: Option<&BindGroup>,
+        bind_group: impl Into<Option<&'a BindGroup>>,
         offsets: &[DynamicOffset],
     ) {
-        let bg = bind_group.map(|x| x.data.as_ref());
+        let bg = bind_group.into().map(|x| x.data.as_ref());
         DynContext::compute_pass_set_bind_group(
             &*self.inner.context,
             self.inner.data.as_mut(),
@@ -124,7 +124,7 @@ impl<'encoder> ComputePass<'encoder> {
 }
 
 /// [`Features::PUSH_CONSTANTS`] must be enabled on the device in order to call these functions.
-impl<'encoder> ComputePass<'encoder> {
+impl ComputePass<'_> {
     /// Set push constant data for subsequent dispatch calls.
     ///
     /// Write the bytes in `data` at offset `offset` within push constant
@@ -144,7 +144,7 @@ impl<'encoder> ComputePass<'encoder> {
 }
 
 /// [`Features::TIMESTAMP_QUERY_INSIDE_PASSES`] must be enabled on the device in order to call these functions.
-impl<'encoder> ComputePass<'encoder> {
+impl ComputePass<'_> {
     /// Issue a timestamp command at this point in the queue. The timestamp will be written to the specified query set, at the specified index.
     ///
     /// Must be multiplied by [`Queue::get_timestamp_period`] to get
@@ -162,7 +162,7 @@ impl<'encoder> ComputePass<'encoder> {
 }
 
 /// [`Features::PIPELINE_STATISTICS_QUERY`] must be enabled on the device in order to call these functions.
-impl<'encoder> ComputePass<'encoder> {
+impl ComputePass<'_> {
     /// Start a pipeline statistics query on this compute pass. It can be ended with
     /// `end_pipeline_statistics_query`. Pipeline statistics queries may not be nested.
     pub fn begin_pipeline_statistics_query(&mut self, query_set: &QuerySet, query_index: u32) {

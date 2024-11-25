@@ -123,6 +123,8 @@ fragment fs_mainOutput fs_main(
             metal::float3 _e37 = color;
             color = _e37 + ((_e23 * diffuse) * light.color.xyz);
         }
+#define LOOP_IS_BOUNDED { volatile bool unpredictable_break_from_loop = false; if (unpredictable_break_from_loop) break; }
+        LOOP_IS_BOUNDED
     }
     metal::float3 _e42 = color;
     metal::float4 _e47 = u_entity.color;
@@ -173,6 +175,7 @@ fragment fs_main_without_storageOutput fs_main_without_storage(
             metal::float3 _e37 = color_1;
             color_1 = _e37 + ((_e23 * diffuse_1) * light_1.color.xyz);
         }
+        LOOP_IS_BOUNDED
     }
     metal::float3 _e42 = color_1;
     metal::float4 _e47 = u_entity.color;

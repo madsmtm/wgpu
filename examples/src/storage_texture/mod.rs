@@ -44,10 +44,7 @@ async fn run(_path: Option<String>) {
         .await
         .unwrap();
 
-    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: None,
-        source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!("shader.wgsl"))),
-    });
+    let shader = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
 
     let storage_texture = device.create_texture(&wgpu::TextureDescriptor {
         label: None,
@@ -117,7 +114,7 @@ async fn run(_path: Option<String>) {
             label: None,
             timestamp_writes: None,
         });
-        compute_pass.set_bind_group(0, Some(&bind_group), &[]);
+        compute_pass.set_bind_group(0, &bind_group, &[]);
         compute_pass.set_pipeline(&pipeline);
         compute_pass.dispatch_workgroups(TEXTURE_DIMS.0 as u32, TEXTURE_DIMS.1 as u32, 1);
     }

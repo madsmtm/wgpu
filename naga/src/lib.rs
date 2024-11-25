@@ -255,6 +255,7 @@ pub mod back;
 mod block;
 #[cfg(feature = "compact")]
 pub mod compact;
+pub mod diagnostic_filter;
 pub mod error;
 pub mod front;
 pub mod keywords;
@@ -268,6 +269,7 @@ pub use crate::arena::{Arena, Handle, Range, UniqueArena};
 pub use crate::span::{SourceLocation, Span, SpanContext, WithSpan};
 #[cfg(feature = "arbitrary")]
 use arbitrary::Arbitrary;
+use diagnostic_filter::DiagnosticFilterNode;
 #[cfg(feature = "deserialize")]
 use serde::Deserialize;
 #[cfg(feature = "serialize")]
@@ -400,6 +402,7 @@ pub enum BuiltIn {
     InstanceIndex,
     PointSize,
     VertexIndex,
+    DrawID,
     // fragment
     FragDepth,
     PointCoord,
@@ -1197,6 +1200,7 @@ pub enum MathFunction {
     Inverse,
     Transpose,
     Determinant,
+    QuantizeToF16,
     // bits
     CountTrailingZeros,
     CountLeadingZeros,
@@ -1402,21 +1406,20 @@ pub enum Expression {
     /// ## Dynamic indexing restrictions
     ///
     /// To accommodate restrictions in some of the shader languages that Naga
-    /// targets, it is not permitted to subscript a matrix or array with a
-    /// dynamically computed index unless that matrix or array appears behind a
-    /// pointer. In other words, if the inner type of `base` is [`Array`] or
-    /// [`Matrix`], then `index` must be a constant. But if the type of `base`
-    /// is a [`Pointer`] to an array or matrix or a [`ValuePointer`] with a
-    /// `size`, then the index may be any expression of integer type.
+    /// targets, it is not permitted to subscript a matrix with a dynamically
+    /// computed index unless that matrix appears behind a pointer. In other
+    /// words, if the inner type of `base` is [`Matrix`], then `index` must be a
+    /// constant. But if the type of `base` is a [`Pointer`] to an matrix, then
+    /// the index may be any expression of integer type.
     ///
     /// You can use the [`Expression::is_dynamic_index`] method to determine
-    /// whether a given index expression requires matrix or array base operands
-    /// to be behind a pointer.
+    /// whether a given index expression requires matrix base operands to be
+    /// behind a pointer.
     ///
     /// (It would be simpler to always require the use of `AccessIndex` when
-    /// subscripting arrays and matrices that are not behind pointers, but to
-    /// accommodate existing front ends, Naga also permits `Access`, with a
-    /// restricted `index`.)
+    /// subscripting matrices that are not behind pointers, but to accommodate
+    /// existing front ends, Naga also permits `Access`, with a restricted
+    /// `index`.)
     ///
     /// [`Vector`]: TypeInner::Vector
     /// [`Matrix`]: TypeInner::Matrix
@@ -2118,6 +2121,14 @@ pub struct Function {
     pub named_expressions: NamedExpressions,
     /// Block of instructions comprising the body of the function.
     pub body: Block,
+    /// The leaf of all diagnostic filter rules tree (stored in [`Module::diagnostic_filters`])
+    /// parsed on this function.
+    ///
+    /// In WGSL, this corresponds to `@diagnostic(…)` attributes.
+    ///
+    /// See [`DiagnosticFilterNode`] for details on how the tree is represented and used in
+    /// validation.
+    pub diagnostic_filter_leaf: Option<Handle<DiagnosticFilterNode>>,
 }
 
 /// The main function for a pipeline stage.
@@ -2270,4 +2281,17 @@ pub struct Module {
     pub functions: Arena<Function>,
     /// Entry points.
     pub entry_points: Vec<EntryPoint>,
+    /// Arena for all diagnostic filter rules parsed in this module, including those in functions
+    /// and statements.
+    ///
+    /// This arena contains elements of a _tree_ of diagnostic filter rules. When nodes are built
+    /// by a front-end, they refer to a parent scope
+    pub diagnostic_filters: Arena<DiagnosticFilterNode>,
+    /// The leaf of all diagnostic filter rules tree parsed from directives in this module.
+    ///
+    /// In WGSL, this corresponds to `diagnostic(…);` directives.
+    ///
+    /// See [`DiagnosticFilterNode`] for details on how the tree is represented and used in
+    /// validation.
+    pub diagnostic_filter_leaf: Option<Handle<DiagnosticFilterNode>>,
 }

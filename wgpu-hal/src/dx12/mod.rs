@@ -190,7 +190,7 @@ impl D3D12Lib {
         blob.ok_or(crate::DeviceError::Unexpected)
     }
 
-    fn debug_interface(&self) -> Result<Direct3D12::ID3D12Debug, crate::DeviceError> {
+    fn debug_interface(&self) -> Result<Option<Direct3D12::ID3D12Debug>, crate::DeviceError> {
         // Calls windows::Win32::Graphics::Direct3D12::D3D12GetDebugInterface on d3d12.dll
         type Fun = extern "system" fn(
             riid: *const windows_core::GUID,
@@ -200,11 +200,18 @@ impl D3D12Lib {
 
         let mut result__ = None;
 
-        (func)(&Direct3D12::ID3D12Debug::IID, <*mut _>::cast(&mut result__))
-            .ok()
-            .into_device_result("GetDebugInterface")?;
+        let res = (func)(&Direct3D12::ID3D12Debug::IID, <*mut _>::cast(&mut result__)).ok();
 
-        result__.ok_or(crate::DeviceError::Unexpected)
+        if let Err(ref err) = res {
+            match err.code() {
+                Dxgi::DXGI_ERROR_SDK_COMPONENT_MISSING => return Ok(None),
+                _ => {}
+            }
+        }
+
+        res.into_device_result("GetDebugInterface")?;
+
+        result__.ok_or(crate::DeviceError::Unexpected).map(Some)
     }
 }
 
@@ -219,7 +226,7 @@ impl DxgiLib {
     }
 
     /// Will error with crate::DeviceError::Unexpected if DXGI 1.3 is not available.
-    pub fn debug_interface1(&self) -> Result<Dxgi::IDXGIInfoQueue, crate::DeviceError> {
+    pub fn debug_interface1(&self) -> Result<Option<Dxgi::IDXGIInfoQueue>, crate::DeviceError> {
         // Calls windows::Win32::Graphics::Dxgi::DXGIGetDebugInterface1 on dxgi.dll
         type Fun = extern "system" fn(
             flags: u32,
@@ -230,11 +237,18 @@ impl DxgiLib {
 
         let mut result__ = None;
 
-        (func)(0, &Dxgi::IDXGIInfoQueue::IID, <*mut _>::cast(&mut result__))
-            .ok()
-            .into_device_result("debug_interface1")?;
+        let res = (func)(0, &Dxgi::IDXGIInfoQueue::IID, <*mut _>::cast(&mut result__)).ok();
 
-        result__.ok_or(crate::DeviceError::Unexpected)
+        if let Err(ref err) = res {
+            match err.code() {
+                Dxgi::DXGI_ERROR_SDK_COMPONENT_MISSING => return Ok(None),
+                _ => {}
+            }
+        }
+
+        res.into_device_result("debug_interface1")?;
+
+        result__.ok_or(crate::DeviceError::Unexpected).map(Some)
     }
 
     /// Will error with crate::DeviceError::Unexpected if DXGI 1.4 is not available.
@@ -550,6 +564,7 @@ struct Idler {
     event: Event,
 }
 
+#[derive(Debug, Clone)]
 struct CommandSignatures {
     draw: Direct3D12::ID3D12CommandSignature,
     draw_indexed: Direct3D12::ID3D12CommandSignature,
@@ -587,6 +602,12 @@ pub struct Device {
     counters: wgt::HalCounters,
 }
 
+impl Drop for Device {
+    fn drop(&mut self) {
+        self.rtv_pool.lock().free_handle(self.null_rtv_handle);
+    }
+}
+
 unsafe impl Send for Device {}
 unsafe impl Sync for Device {}
 
@@ -622,8 +643,11 @@ enum RootElement {
     Empty,
     Constant,
     SpecialConstantBuffer {
+        /// The first vertex in an indirect draw call, _or_ the `x` of a compute dispatch.
         first_vertex: i32,
+        /// The first instance in an indirect draw call, _or_ the `y` of a compute dispatch.
         first_instance: u32,
+        /// Unused in an indirect draw call, _or_ the `z` of a compute dispatch.
         other: u32,
     },
     /// Descriptor table.
@@ -667,7 +691,7 @@ impl PassState {
             layout: PipelineLayoutShared {
                 signature: None,
                 total_root_elements: 0,
-                special_constants_root_index: None,
+                special_constants: None,
                 root_constant_info: None,
             },
             root_elements: [RootElement::Empty; MAX_ROOT_ELEMENTS],
@@ -757,6 +781,12 @@ pub struct Texture {
     mip_level_count: u32,
     sample_count: u32,
     allocation: Option<suballocation::AllocationWrapper>,
+}
+
+impl Texture {
+    pub unsafe fn raw_resource(&self) -> &Direct3D12::ID3D12Resource {
+        &self.resource
+    }
 }
 
 impl crate::DynTexture for Texture {}
@@ -904,12 +934,21 @@ struct RootConstantInfo {
 struct PipelineLayoutShared {
     signature: Option<Direct3D12::ID3D12RootSignature>,
     total_root_elements: RootIndex,
-    special_constants_root_index: Option<RootIndex>,
+    special_constants: Option<PipelineLayoutSpecialConstants>,
     root_constant_info: Option<RootConstantInfo>,
 }
 
 unsafe impl Send for PipelineLayoutShared {}
 unsafe impl Sync for PipelineLayoutShared {}
+
+#[derive(Debug, Clone)]
+struct PipelineLayoutSpecialConstants {
+    root_index: RootIndex,
+    cmd_signatures: CommandSignatures,
+}
+
+unsafe impl Send for PipelineLayoutSpecialConstants {}
+unsafe impl Sync for PipelineLayoutSpecialConstants {}
 
 #[derive(Debug)]
 pub struct PipelineLayout {
@@ -926,6 +965,7 @@ impl crate::DynPipelineLayout for PipelineLayout {}
 pub struct ShaderModule {
     naga: crate::NagaShader,
     raw_name: Option<ffi::CString>,
+    runtime_checks: bool,
 }
 
 impl crate::DynShaderModule for ShaderModule {}
